@@ -1,635 +1,761 @@
-//
-// mkbundle: tool to create bundles.
-//
-// Based on the `make-bundle' Perl script written by Paolo Molaro (lupus@debian.org)
-//
-// Author:
-//   Miguel de Icaza
-//
-// (C) Novell, Inc 2004
-//
+#region Usings
+
 using System;
-using System.Diagnostics;
-using System.Xml;
 using System.Collections;
-using System.Reflection;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using Mono.Unix;
 using ICSharpCode.SharpZipLib.Zip.Compression.Streams;
 
-class MakeBundle {
-	static string output = "a.out";
-	static string object_out = null;
-	static ArrayList link_paths = new ArrayList ();
-	static bool autodeps = false;
-	static bool keeptemp = false;
-	static bool compile_only = false;
-	static bool static_link = false;
-	static string config_file = null;
-	static string machine_config_file = null;
-	static string config_dir = null;
-	static string style = "linux";
-	static bool compress;
-	static bool nomain;
-	
-	static int Main (string [] args)
-	{
-		ArrayList sources = new ArrayList ();
-		int top = args.Length;
-		link_paths.Add (".");
 
-		DetectOS ();
-		
-		for (int i = 0; i < top; i++){
-			switch (args [i]){
-			case "--help": case "-h": case "-?":
-				Help ();
-				return 1;
+#endregion
 
-			case "-c":
-				compile_only = true;
-				break;
-				
-			case "-o": 
-				if (i+1 == top){
-					Help (); 
-					return 1;
-				}
-				output = args [++i];
-				break;
+namespace mkbundle
+{
+    internal class MakeBundle
+    {
+        private static string _output = "a.out";
+        private static string _objectOut;
+        private static readonly List<string> LinkPaths = new List<string>();
+        private static bool _autodeps;
+        private static bool _keeptemp;
+        private static bool _compileOnly;
+        private static bool _staticLink;
+        private static string _configFile;
+        private static string _machineConfigFile;
+        private static string _configDir;
+        private static string _style = "linux";
+        private static bool _compress;
+        private static bool _nomain;
+        private static readonly string[] Chars = new string[256];
 
-			case "-oo":
-				if (i+1 == top){
-					Help (); 
-					return 1;
-				}
-				object_out = args [++i];
-				break;
+        private static bool IsUnix
+        {
+            get
+            {
+                var p = (int) Environment.OSVersion.Platform;
+                return ((p == 4) || (p == 128) || (p == 6));
+            }
+        }
 
-			case "-L":
-				if (i+1 == top){
-					Help (); 
-					return 1;
-				}
-				link_paths.Add (args [++i]);
-				break;
+        private static int Main(string[] args)
+        {
+            var sources = new List<string>();
+            var top = args.Length;
+            LinkPaths.Add(".");
 
-			case "--nodeps":
-				autodeps = false;
-				break;
+            DetectOS();
 
-			case "--deps":
-				autodeps = true;
-				break;
+            for (var i = 0; i < top; i++)
+            {
+                switch (args[i])
+                {
+                    case "--help":
+                    case "-h":
+                    case "-?":
+                        Help();
+                        return 1;
 
-			case "--keeptemp":
-				keeptemp = true;
-				break;
-			case "--static":
-				if (style == "windows") {
-					Console.Error.WriteLine ("The option `{0}' is not supported on this platform.", args [i]);
-					return 1;
-				}
-				static_link = true;
-				Console.WriteLine ("Note that statically linking the LGPL Mono runtime has more licensing restrictions than dynamically linking.");
-				Console.WriteLine ("See http://www.mono-project.com/Licensing for details on licensing.");
-				break;
-			case "--config":
-				if (i+1 == top) {
-					Help ();
-					return 1;
-				}
+                    case "-c":
+                        _compileOnly = true;
+                        break;
 
-				config_file = args [++i];
-				break;
-			case "--machine-config":
-				if (i+1 == top) {
-					Help ();
-					return 1;
-				}
+                    case "-o":
+                        if (i + 1 == top)
+                        {
+                            Help();
+                            return 1;
+                        }
+                        _output = args[++i];
+                        break;
 
-				machine_config_file = args [++i];
+                    case "-oo":
+                        if (i + 1 == top)
+                        {
+                            Help();
+                            return 1;
+                        }
+                        _objectOut = args[++i];
+                        break;
 
-				Console.WriteLine ("WARNING:\n  Check that the machine.config file you are bundling\n  doesn't contain sensitive information specific to this machine.");
-				break;
-			case "--config-dir":
-				if (i+1 == top) {
-					Help ();
-					return 1;
-				}
+                    case "-L":
+                        if (i + 1 == top)
+                        {
+                            Help();
+                            return 1;
+                        }
+                        LinkPaths.Add(args[++i]);
+                        break;
 
-				config_dir = args [++i];
-				break;
-			case "-z":
-				compress = true;
-				break;
-			case "--nomain":
-				nomain = true;
-				break;
-			default:
-				sources.Add (args [i]);
-				break;
-			}
-		}
+                    case "--nodeps":
+                        _autodeps = false;
+                        break;
 
-		Console.WriteLine ("Sources: {0} Auto-dependencies: {1}", sources.Count, autodeps);
-		if (sources.Count == 0 || output == null) {
-			Help ();
-			Environment.Exit (1);
-		}
+                    case "--deps":
+                        _autodeps = true;
+                        break;
 
-		ArrayList assemblies = LoadAssemblies (sources);
-		ArrayList files = new ArrayList ();
-		foreach (Assembly a in assemblies)
-			QueueAssembly (files, a.CodeBase);
-			
-		// Special casing mscorlib.dll: any specified mscorlib.dll cannot be loaded
-		// by Assembly.ReflectionFromLoadFrom(). Instead the fx assembly which runs
-		// mkbundle.exe is loaded, which is not what we want.
-		// So, replace it with whatever actually specified.
-		foreach (string srcfile in sources) {
-			if (Path.GetFileName (srcfile) == "mscorlib.dll") {
-				foreach (string file in files) {
-					if (Path.GetFileName (new Uri (file).LocalPath) == "mscorlib.dll") {
-						files.Remove (file);
-						files.Add (new Uri (Path.GetFullPath (srcfile)).LocalPath);
-						break;
-					}
-				}
-				break;
-			}
-		}
+                    case "--keeptemp":
+                        _keeptemp = true;
+                        break;
+                    case "--static":
+                        if (_style == "windows")
+                        {
+                            Console.Error.WriteLine("The option `{0}' is not supported on this platform.", args[i]);
+                            return 1;
+                        }
+                        _staticLink = true;
+                        Console.WriteLine(
+                            "Note that statically linking the LGPL Mono runtime has more licensing restrictions than dynamically linking.");
+                        Console.WriteLine("See http://www.mono-project.com/Licensing for details on licensing.");
+                        break;
+                    case "--config":
+                        if (i + 1 == top)
+                        {
+                            Help();
+                            return 1;
+                        }
 
-		GenerateBundles (files);
-		//GenerateJitWrapper ();
-		
-		return 0;
-	}
+                        _configFile = args[++i];
+                        break;
+                    case "--machine-config":
+                        if (i + 1 == top)
+                        {
+                            Help();
+                            return 1;
+                        }
 
-	static void WriteSymbol (StreamWriter sw, string name, long size)
-	{
-		switch (style){
-		case "linux":
-			sw.WriteLine (
-				".globl {0}\n" +
-				"\t.section .rodata\n" +
-				"\t.p2align 5\n" +
-				"\t.type {0}, \"object\"\n" +
-				"\t.size {0}, {1}\n" +
-				"{0}:\n",
-				name, size);
-			break;
-		case "osx":
-			sw.WriteLine (
-				"\t.section __TEXT,__text,regular,pure_instructions\n" + 
-				"\t.globl _{0}\n" +
-				"\t.data\n" +
-				"\t.align 4\n" +
-				"_{0}:\n",
-				name, size);
-			break;
-		case "windows":
-			sw.WriteLine (
-				".globl _{0}\n" +
-				"\t.section .rdata,\"dr\"\n" +
-				"\t.align 32\n" +
-				"_{0}:\n",
-				name, size);
-			break;
-		}
-	}
-	
-	static string [] chars = new string [256];
-	
-	static void WriteBuffer (StreamWriter ts, Stream stream, byte[] buffer)
-	{
-		int n;
-		
-		// Preallocate the strings we need.
-		if (chars [0] == null) {
-			for (int i = 0; i < chars.Length; i++)
-				chars [i] = string.Format ("\t.byte {0}\n", i.ToString ());
-		}
+                        _machineConfigFile = args[++i];
 
-		while ((n = stream.Read (buffer, 0, buffer.Length)) != 0) {
-			for (int i = 0; i < n; i++)
-				ts.Write (chars [buffer [i]]);
-		}
+                        Console.WriteLine(
+                            "WARNING:\n  Check that the machine.config file you are bundling\n  doesn't contain sensitive information specific to this machine.");
+                        break;
+                    case "--config-dir":
+                        if (i + 1 == top)
+                        {
+                            Help();
+                            return 1;
+                        }
 
-		ts.WriteLine ();
-	}
-	
-	static void GenerateBundles (ArrayList files)
-	{
-		string temp_s = "temp.s"; // Path.GetTempFileName ();
-		string temp_c = "temp.c";
-		string temp_o = "temp.o";
+                        _configDir = args[++i];
+                        break;
+                    case "-z":
+                        _compress = true;
+                        break;
+                    case "--nomain":
+                        _nomain = true;
+                        break;
+                    default:
+                        sources.Add(args[i]);
+                        break;
+                }
+            }
 
-		if (compile_only)
-			temp_c = output;
-		if (object_out != null)
-			temp_o = object_out;
-		
-		try {
-			ArrayList c_bundle_names = new ArrayList ();
-			ArrayList config_names = new ArrayList ();
-			byte [] buffer = new byte [8192];
+            Console.WriteLine("Sources: {0} Auto-dependencies: {1}", sources.Count, _autodeps);
+            if (sources.Count == 0 || _output == null)
+            {
+                Help();
+                Environment.Exit(1);
+            }
 
-			using (StreamWriter ts = new StreamWriter (File.Create (temp_s))) {
-			using (StreamWriter tc = new StreamWriter (File.Create (temp_c))) {
-			string prog = null;
+            var assemblies = LoadAssemblies(sources);
 
-			tc.WriteLine ("/* This source code was produced by mkbundle, do not edit */");
-			tc.WriteLine ("#include <mono/metadata/mono-config.h>");
-			tc.WriteLine ("#include <mono/metadata/assembly.h>\n");
+            if (_autodeps)
+            {
+                var refs = assemblies.SelectMany(x => x.GetReferencedAssemblies()).Distinct().ToList();
+                LoadReferences(refs, assemblies);
+            }
 
-			if (compress) {
-				tc.WriteLine ("typedef struct _compressed_data {");
-				tc.WriteLine ("\tMonoBundledAssembly assembly;");
-				tc.WriteLine ("\tint compressed_size;");
-				tc.WriteLine ("} CompressedAssembly;\n");
-			}
 
-			foreach (string url in files){
-				string fname = new Uri (url).LocalPath;
-				string aname = Path.GetFileName (fname);
-				string encoded = aname.Replace ("-", "_").Replace (".", "_");
+            var files = assemblies.Select(asm => asm.CodeBase).ToList();
 
-				if (prog == null)
-					prog = aname;
-				
-				Console.WriteLine ("   embedding: " + fname);
-				
-				Stream stream = File.OpenRead (fname);
+            // Special casing mscorlib.dll: any specified mscorlib.dll cannot be loaded
+            // by Assembly.ReflectionFromLoadFrom(). Instead the fx assembly which runs
+            // mkbundle.exe is loaded, which is not what we want.
+            // So, replace it with whatever actually specified.
+            foreach (var srcfile in sources.Where(srcfile => Path.GetFileName(srcfile) == "mscorlib.dll"))
+            {
+                foreach (var file in files.Where(file => Path.GetFileName(new Uri(file).LocalPath) == "mscorlib.dll"))
+                {
+                    files.Remove(file);
+                    files.Add(new Uri(Path.GetFullPath(srcfile)).LocalPath);
+                    break;
+                }
+                break;
+            }
 
-				// Compression can be parallelized
-				long real_size = stream.Length;
-				int n;
-				if (compress) {
-					MemoryStream ms = new MemoryStream ();
-					DeflaterOutputStream deflate = new DeflaterOutputStream (ms);
-					while ((n = stream.Read (buffer, 0, buffer.Length)) != 0){
-						deflate.Write (buffer, 0, n);
-					}
-					stream.Close ();
-					deflate.Finish ();
-					byte [] bytes = ms.GetBuffer ();
-					stream = new MemoryStream (bytes, 0, (int) ms.Length, false, false);
-				}
+            GenerateBundles(files);
+            //GenerateJitWrapper ();
 
-				WriteSymbol (ts, "assembly_data_" + encoded, stream.Length);
-			
-				WriteBuffer (ts, stream, buffer);
+            return 0;
+        }
 
-				if (compress) {
-					tc.WriteLine ("extern const unsigned char assembly_data_{0} [];", encoded);
-					tc.WriteLine ("static CompressedAssembly assembly_bundle_{0} = {{{{\"{1}\"," +
-							" assembly_data_{0}, {2}}}, {3}}};",
-						      encoded, aname, real_size, stream.Length);
-					double ratio = ((double) stream.Length * 100) / real_size;
-					Console.WriteLine ("   compression ratio: {0:.00}%", ratio);
-				} else {
-					tc.WriteLine ("extern const unsigned char assembly_data_{0} [];", encoded);
-					tc.WriteLine ("static const MonoBundledAssembly assembly_bundle_{0} = {{\"{1}\", assembly_data_{0}, {2}}};",
-						      encoded, aname, real_size);
-				}
-				stream.Close ();
+        private static void WriteSymbol(TextWriter sw, string name, long size)
+        {
+            switch (_style)
+            {
+                case "linux":
+                    sw.WriteLine(
+                        ".globl {0}\n" +
+                        "\t.section .rodata\n" +
+                        "\t.p2align 5\n" +
+                        "\t.type {0}, \"object\"\n" +
+                        "\t.size {0}, {1}\n" +
+                        "{0}:\n",
+                        name, size);
+                    break;
+                case "osx":
+                    sw.WriteLine(
+                        "\t.section __TEXT,__text,regular,pure_instructions\n" +
+                        "\t.globl _{0}\n" +
+                        "\t.data\n" +
+                        "\t.align 4\n" +
+                        "_{0}:\n",
+                        name, size);
+                    break;
+                case "windows":
+                    sw.WriteLine(
+                        ".globl _{0}\n" +
+                        "\t.section .rdata,\"dr\"\n" +
+                        "\t.align 32\n" +
+                        "_{0}:\n",
+                        name, size);
+                    break;
+            }
+        }
 
-				c_bundle_names.Add ("assembly_bundle_" + encoded);
+        private static void WriteBuffer(TextWriter ts, Stream stream, byte[] buffer)
+        {
+            int n;
 
-				try {
-					FileStream cf = File.OpenRead (fname + ".config");
-					Console.WriteLine (" config from: " + fname + ".config");
-					tc.WriteLine ("extern const unsigned char assembly_config_{0} [];", encoded);
-					WriteSymbol (ts, "assembly_config_" + encoded, cf.Length);
-					WriteBuffer (ts, cf, buffer);
-					ts.WriteLine ();
-					config_names.Add (new string[] {aname, encoded});
-				} catch (FileNotFoundException) {
-					/* we ignore if the config file doesn't exist */
-				}
+            // Preallocate the strings we need.
+            if (Chars[0] == null)
+            {
+                for (var i = 0; i < Chars.Length; i++)
+                    Chars[i] = string.Format("\t.byte {0}\n", i);
+            }
 
-			}
-			if (config_file != null){
-				FileStream conf;
-				try {
-					conf = File.OpenRead (config_file);
-				} catch {
-					Error (String.Format ("Failure to open {0}", config_file));
-					return;
-				}
-				Console.WriteLine ("System config from: " + config_file);
-				tc.WriteLine ("extern const char system_config;");
-				WriteSymbol (ts, "system_config", config_file.Length);
+            while ((n = stream.Read(buffer, 0, buffer.Length)) != 0)
+            {
+                for (var i = 0; i < n; i++)
+                    ts.Write(Chars[buffer[i]]);
+            }
 
-				WriteBuffer (ts, conf, buffer);
-				// null terminator
-				ts.Write ("\t.byte 0\n");
-				ts.WriteLine ();
-			}
+            ts.WriteLine();
+        }
 
-			if (machine_config_file != null){
-				FileStream conf;
-				try {
-					conf = File.OpenRead (machine_config_file);
-				} catch {
-					Error (String.Format ("Failure to open {0}", machine_config_file));
-					return;
-				}
-				Console.WriteLine ("Machine config from: " + machine_config_file);
-				tc.WriteLine ("extern const char machine_config;");
-				WriteSymbol (ts, "machine_config", machine_config_file.Length);
+        private static void GenerateBundles(IEnumerable files)
+        {
+            var temp_s = "temp.s"; // Path.GetTempFileName ();
+            var tempC = "temp.c";
+            var tempO = "temp.o";
 
-				WriteBuffer (ts, conf, buffer);
-				ts.Write ("\t.byte 0\n");
-				ts.WriteLine ();
-			}
-			ts.Close ();
-			
-			Console.WriteLine ("Compiling:");
-			string cmd = String.Format ("{0} -o {1} {2} ", GetEnv ("AS", "as"), temp_o, temp_s);
-			int ret = Execute (cmd);
-			if (ret != 0){
-				Error ("[Fail]");
-				return;
-			}
+            if (_compileOnly)
+                tempC = _output;
+            if (_objectOut != null)
+                tempO = _objectOut;
 
-			if (compress)
-				tc.WriteLine ("\nstatic const CompressedAssembly *compressed [] = {");
-			else
-				tc.WriteLine ("\nstatic const MonoBundledAssembly *bundled [] = {");
+            try
+            {
+                var cBundleNames = new ArrayList();
+                var configNames = new ArrayList();
+                var buffer = new byte[8192];
 
-			foreach (string c in c_bundle_names){
-				tc.WriteLine ("\t&{0},", c);
-			}
-			tc.WriteLine ("\tNULL\n};\n");
-			tc.WriteLine ("static char *image_name = \"{0}\";", prog);
+                using (var ts = new StreamWriter(File.Create(temp_s)))
+                {
+                    using (var tc = new StreamWriter(File.Create(tempC)))
+                    {
+                        string prog = null;
 
-			tc.WriteLine ("\nstatic void install_dll_config_files (void) {\n");
-			foreach (string[] ass in config_names){
-				tc.WriteLine ("\tmono_register_config_for_assembly (\"{0}\", assembly_config_{1});\n", ass [0], ass [1]);
-			}
-			if (config_file != null)
-				tc.WriteLine ("\tmono_config_parse_memory (&system_config);\n");
-			if (machine_config_file != null)
-				tc.WriteLine ("\tmono_register_machine_config (&machine_config);\n");
-			tc.WriteLine ("}\n");
+                        tc.WriteLine("/* This source code was produced by mkbundle, do not edit */");
+                        tc.WriteLine("#include <mono/metadata/mono-config.h>");
+                        tc.WriteLine("#include <mono/metadata/assembly.h>\n");
 
-			if (config_dir != null)
-				tc.WriteLine ("static const char *config_dir = \"{0}\";", config_dir);
-			else
-				tc.WriteLine ("static const char *config_dir = NULL;");
+                        if (_compress)
+                        {
+                            tc.WriteLine("typedef struct _compressed_data {");
+                            tc.WriteLine("\tMonoBundledAssembly assembly;");
+                            tc.WriteLine("\tint compressed_size;");
+                            tc.WriteLine("} CompressedAssembly;\n");
+                        }
 
-			Stream template_stream;
-			if (compress) {
-				template_stream = Assembly.GetAssembly (typeof(MakeBundle)).GetManifestResourceStream ("template_z.c");
-			} else {
-				template_stream = Assembly.GetAssembly (typeof(MakeBundle)).GetManifestResourceStream ("template.c");
-			}
+                        foreach (string url in files)
+                        {
+                            var fname = new Uri(url).LocalPath;
+                            var aname = Path.GetFileName(fname);
+                            var encoded = aname.Replace("-", "_").Replace(".", "_");
 
-			StreamReader s = new StreamReader (template_stream);
-			string template = s.ReadToEnd ();
-			tc.Write (template);
+                            if (prog == null)
+                                prog = aname;
 
-			if (!nomain) {
-				Stream template_main_stream = Assembly.GetAssembly (typeof(MakeBundle)).GetManifestResourceStream ("template_main.c");
-				StreamReader st = new StreamReader (template_main_stream);
-				string maintemplate = st.ReadToEnd ();
-				tc.Write (maintemplate);
-			}
-			
-			tc.Close ();
+                            Console.WriteLine("   embedding: " + fname);
 
-			if (compile_only)
-				return;
+                            Stream stream = File.OpenRead(fname);
 
-			string zlib = (compress ? "-lz" : "");
-			string debugging = "-g";
-			string cc = GetEnv ("CC", IsUnix ? "cc" : "gcc -mno-cygwin");
+                            // Compression can be parallelized
+                            var realSize = stream.Length;
+                            if (_compress)
+                            {
+                                var ms = new MemoryStream();
+                                var deflate = new DeflaterOutputStream(ms);
+                                int n;
+                                while ((n = stream.Read(buffer, 0, buffer.Length)) != 0)
+                                {
+                                    deflate.Write(buffer, 0, n);
+                                }
+                                stream.Close();
+                                deflate.Finish();
+                                var bytes = ms.GetBuffer();
+                                stream = new MemoryStream(bytes, 0, (int) ms.Length, false, false);
+                            }
 
-			if (style == "linux")
-				debugging = "-ggdb";
-			if (static_link) {
-				string smonolib;
-				if (style == "osx")
-					smonolib = "`pkg-config --variable=libdir mono-2`/libmono-2.0.a ";
-				else
-					smonolib = "-Wl,-Bstatic -lmono-2.0 -Wl,-Bdynamic ";
-				cmd = String.Format ("{4} -o {2} -Wall `pkg-config --cflags mono-2` {0} {3} " +
-						     "`pkg-config --libs-only-L mono-2` " + smonolib +
-						     "`pkg-config --libs-only-l mono-2 | sed -e \"s/\\-lmono-2.0 //\"` {1}",
-						     temp_c, temp_o, output, zlib, cc);
-			} else {
-				
-				cmd = String.Format ("{4} " + debugging + " -o {2} -Wall {0} `pkg-config --cflags --libs mono-2` {3} {1}",
-						     temp_c, temp_o, output, zlib, cc);
-			}
-                            
-			ret = Execute (cmd);
-			if (ret != 0){
-				Error ("[Fail]");
-				return;
-			}
-			Console.WriteLine ("Done");
-			}
-			}
-		} finally {
-			if (!keeptemp){
-				if (object_out == null){
-					File.Delete (temp_o);
-				}
-				if (!compile_only){
-					File.Delete (temp_c);
-				}
-				File.Delete (temp_s);
-			}
-		}
-	}
-	
-	static ArrayList LoadAssemblies (ArrayList sources)
-	{
-		ArrayList assemblies = new ArrayList ();
-		bool error = false;
-		
-		foreach (string name in sources){
-			Assembly a = LoadAssembly (name);
+                            WriteSymbol(ts, "assembly_data_" + encoded, stream.Length);
 
-			if (a == null){
-				error = true;
-				continue;
-			}
-			
-			assemblies.Add (a);
-		}
+                            WriteBuffer(ts, stream, buffer);
 
-		if (error)
-			Environment.Exit (1);
+                            if (_compress)
+                            {
+                                tc.WriteLine("extern const unsigned char assembly_data_{0} [];", encoded);
+                                tc.WriteLine("static CompressedAssembly assembly_bundle_{0} = {{{{\"{1}\"," +
+                                             " assembly_data_{0}, {2}}}, {3}}};",
+                                             encoded, aname, realSize, stream.Length);
+                                var ratio = ((double) stream.Length*100)/realSize;
+                                Console.WriteLine("   compression ratio: {0:.00}%", ratio);
+                            }
+                            else
+                            {
+                                tc.WriteLine("extern const unsigned char assembly_data_{0} [];", encoded);
+                                tc.WriteLine(
+                                    "static const MonoBundledAssembly assembly_bundle_{0} = {{\"{1}\", assembly_data_{0}, {2}}};",
+                                    encoded, aname, realSize);
+                            }
+                            stream.Close();
 
-		return assemblies;
-	}
-	
-	static void QueueAssembly (ArrayList files, string codebase)
-	{
-		if (files.Contains (codebase))
-			return;
+                            cBundleNames.Add("assembly_bundle_" + encoded);
 
-		files.Add (codebase);
-		Assembly a = Assembly.LoadFrom (new Uri(codebase).LocalPath);
+                            try
+                            {
+                                var cf = File.OpenRead(fname + ".config");
+                                Console.WriteLine(" config from: " + fname + ".config");
+                                tc.WriteLine("extern const unsigned char assembly_config_{0} [];", encoded);
+                                WriteSymbol(ts, "assembly_config_" + encoded, cf.Length);
+                                WriteBuffer(ts, cf, buffer);
+                                ts.WriteLine();
+                                configNames.Add(new[] {aname, encoded});
+                            }
+                            catch (FileNotFoundException)
+                            {
+                                /* we ignore if the config file doesn't exist */
+                            }
+                        }
+                        if (_configFile != null)
+                        {
+                            FileStream conf;
+                            try
+                            {
+                                conf = File.OpenRead(_configFile);
+                            }
+                            catch
+                            {
+                                Error(String.Format("Failure to open {0}", _configFile));
+                                return;
+                            }
+                            Console.WriteLine("System config from: " + _configFile);
+                            tc.WriteLine("extern const char system_config;");
+                            WriteSymbol(ts, "system_config", _configFile.Length);
 
-		if (!autodeps)
-			return;
-		
-		foreach (AssemblyName an in a.GetReferencedAssemblies ()) {
-			a = Assembly.Load (an);
-			QueueAssembly (files, a.CodeBase);
-		}
-	}
+                            WriteBuffer(ts, conf, buffer);
+                            // null terminator
+                            ts.Write("\t.byte 0\n");
+                            ts.WriteLine();
+                        }
 
-	static Assembly LoadAssembly (string assembly)
-	{
-		Assembly a;
-		
-		try {
-			char[] path_chars = { '/', '\\' };
-			
-			if (assembly.IndexOfAny (path_chars) != -1) {
-				a = Assembly.LoadFrom (assembly);
-			} else {
-				string ass = assembly;
-				if (ass.EndsWith (".dll"))
-					ass = assembly.Substring (0, assembly.Length - 4);
-				a = Assembly.Load (ass);
-			}
-			return a;
-		} catch (FileNotFoundException){
-			string total_log = "";
-			
-			foreach (string dir in link_paths){
-				string full_path = Path.Combine (dir, assembly);
-				if (!assembly.EndsWith (".dll") && !assembly.EndsWith (".exe"))
-					full_path += ".dll";
-				
-				try {
-					a = Assembly.LoadFrom (full_path);
-					return a;
-				} catch (FileNotFoundException ff) {
-					total_log += ff.FusionLog;
-					continue;
-				}
-			}
-			Error ("Cannot find assembly `" + assembly + "'" );
-			Console.WriteLine ("Log: \n" + total_log);
-		} catch (BadImageFormatException f) {
-			Error ("Cannot load assembly (bad file format)" + f.FusionLog);
-		} catch (FileLoadException f){
-			Error ("Cannot load assembly " + f.FusionLog);
-		} catch (ArgumentNullException){
-			Error("Cannot load assembly (null argument)");
-		}
-		return null;
-	}
+                        if (_machineConfigFile != null)
+                        {
+                            FileStream conf;
+                            try
+                            {
+                                conf = File.OpenRead(_machineConfigFile);
+                            }
+                            catch
+                            {
+                                Error(String.Format("Failure to open {0}", _machineConfigFile));
+                                return;
+                            }
+                            Console.WriteLine("Machine config from: " + _machineConfigFile);
+                            tc.WriteLine("extern const char machine_config;");
+                            WriteSymbol(ts, "machine_config", _machineConfigFile.Length);
 
-	static void Error (string msg)
-	{
-		Console.Error.WriteLine (msg);
-		Environment.Exit (1);
-	}
+                            WriteBuffer(ts, conf, buffer);
+                            ts.Write("\t.byte 0\n");
+                            ts.WriteLine();
+                        }
+                        ts.Close();
 
-	static void Help ()
-	{
-		Console.WriteLine ("Usage is: mkbundle [options] assembly1 [assembly2...]\n\n" +
-				   "Options:\n" +
-				   "    -c                  Produce stub only, do not compile\n" +
-				   "    -o out              Specifies output filename\n" +
-				   "    -oo obj             Specifies output filename for helper object file\n" +
-				   "    -L path             Adds `path' to the search path for assemblies\n" +
-				   "    --nodeps            Turns off automatic dependency embedding (default)\n" +
-				   "    --deps              Turns on automatic dependency embedding\n" +
-				   "    --keeptemp          Keeps the temporary files\n" +
-				   "    --config F          Bundle system config file `F'\n" +
-				   "    --config-dir D      Set MONO_CFG_DIR to `D'\n" +
-				   "    --machine-config F  Use the given file as the machine.config for the application.\n" +
-				   "    --static            Statically link to mono libs\n" +
-				   "    --nomain            Don't include a main() function, for libraries\n" +
-				   "    -z                  Compress the assemblies before embedding.\n" +
-				   "                        You need zlib development headers and libraries.\n");
-	}
+                        Console.WriteLine("Compiling:");
+                        var cmd = String.Format("{0} -o {1} {2} ", GetEnv("AS", "as"), tempO, temp_s);
+                        var ret = Execute(cmd);
+                        if (ret != 0)
+                        {
+                            Error("[Fail]");
+                            return;
+                        }
 
-	[DllImport ("libc")]
-	static extern int system (string s);
-	[DllImport ("libc")]
-	static extern int uname (IntPtr buf);
-		
-	static void DetectOS ()
-	{
-		if (!IsUnix) {
-			Console.WriteLine ("OS is: Windows");
-			style = "windows";
-			return;
-		}
+                        tc.WriteLine(_compress
+                                         ? "\nstatic const CompressedAssembly *compressed [] = {"
+                                         : "\nstatic const MonoBundledAssembly *bundled [] = {");
 
-		IntPtr buf = UnixMarshal.AllocHeap(8192);
-		if (uname (buf) != 0){
-			Console.WriteLine ("Warning: Unable to detect OS");
-			UnixMarshal.FreeHeap(buf);
-			return;
-		}
-		string os = Marshal.PtrToStringAnsi (buf);
-		Console.WriteLine ("OS is: " + os);
-		if (os == "Darwin")
-			style = "osx";
-		
-		UnixMarshal.FreeHeap(buf);
-	}
+                        foreach (string c in cBundleNames)
+                        {
+                            tc.WriteLine("\t&{0},", c);
+                        }
+                        tc.WriteLine("\tNULL\n};\n");
+                        tc.WriteLine("static char *image_name = \"{0}\";", prog);
 
-	static bool IsUnix {
-		get {
-			int p = (int) Environment.OSVersion.Platform;
-			return ((p == 4) || (p == 128) || (p == 6));
-		}
-	}
+                        tc.WriteLine("\nstatic void install_dll_config_files (void) {\n");
+                        foreach (string[] ass in configNames)
+                        {
+                            tc.WriteLine("\tmono_register_config_for_assembly (\"{0}\", assembly_config_{1});\n", ass[0],
+                                         ass[1]);
+                        }
+                        if (_configFile != null)
+                            tc.WriteLine("\tmono_config_parse_memory (&system_config);\n");
+                        if (_machineConfigFile != null)
+                            tc.WriteLine("\tmono_register_machine_config (&machine_config);\n");
+                        tc.WriteLine("}\n");
 
-	static int Execute (string cmdLine)
-	{
-		if (IsUnix) {
-			Console.WriteLine (cmdLine);
-			return system (cmdLine);
-		}
+                        if (_configDir != null)
+                            tc.WriteLine("static const char *config_dir = \"{0}\";", _configDir);
+                        else
+                            tc.WriteLine("static const char *config_dir = NULL;");
 
-		// on Windows, we have to pipe the output of a
-		// `cmd` interpolation to dos2unix, because the shell does not
-		// strip the CRLFs generated by the native pkg-config distributed
-		// with Mono.
-		StringBuilder b = new StringBuilder ();
-		int count = 0;
-		for (int i = 0; i < cmdLine.Length; i++) {
-			if (cmdLine [i] == '`') {
-				if (count % 2 != 0) {
-					b.Append ("|dos2unix");
-				}
-				count++;
-			}
-			b.Append (cmdLine [i]);
-		}
-		cmdLine = b.ToString ();
-		Console.WriteLine (cmdLine);
-			
-		ProcessStartInfo psi = new ProcessStartInfo ();
-		psi.UseShellExecute = false;
-		psi.FileName = "sh";
-		psi.Arguments = String.Format ("-c \"{0}\"", cmdLine);
+                        var templateStream = Assembly.GetAssembly(typeof (MakeBundle)).GetManifestResourceStream(_compress ? "template_z.c" : "template.c");
 
-		using (Process p = Process.Start (psi)) {
-			p.WaitForExit ();
-			return p.ExitCode;
-		}
-	}
+                        var s = new StreamReader(templateStream);
+                        var template = s.ReadToEnd();
+                        tc.Write(template);
 
-	static string GetEnv (string name, string defaultValue) 
-	{
-		string s = Environment.GetEnvironmentVariable (name);
-		return s != null ? s : defaultValue;
-	}
+                        if (!_nomain)
+                        {
+                            var templateMainStream = Assembly.GetAssembly(typeof (MakeBundle)).GetManifestResourceStream("template_main.c");
+                            var st = new StreamReader(templateMainStream);
+                            var maintemplate = st.ReadToEnd();
+                            tc.Write(maintemplate);
+                        }
+
+                        tc.Close();
+
+                        if (_compileOnly)
+                            return;
+
+                        var zlib = (_compress ? "-lz" : "");
+                        var debugging = "-g";
+                        var cc = GetEnv("CC", IsUnix ? "cc" : "gcc -mno-cygwin");
+
+                        if (_style == "linux")
+                            debugging = "-ggdb";
+                        if (_staticLink)
+                        {
+                            var smonolib = _style == "osx" ? "`pkg-config --variable=libdir mono-2`/libmono-2.0.a " : "-Wl,-Bstatic -lmono-2.0 -Wl,-Bdynamic ";
+                            cmd = String.Format("{4} -o {2} -Wall `pkg-config --cflags mono-2` {0} {3} " +
+                                                "`pkg-config --libs-only-L mono-2` " + smonolib +
+                                                "`pkg-config --libs-only-l mono-2 | sed -e \"s/\\-lmono-2.0 //\"` {1}",
+                                                tempC, tempO, _output, zlib, cc);
+                        }
+                        else
+                        {
+                            cmd =
+                                String.Format(
+                                    "{4} " + debugging + " -o {2} -Wall {0} `pkg-config --cflags --libs mono-2` {3} {1}",
+                                    tempC, tempO, _output, zlib, cc);
+                        }
+
+                        ret = Execute(cmd);
+                        if (ret != 0)
+                        {
+                            Error("[Fail]");
+                            return;
+                        }
+                        Console.WriteLine("Done");
+                    }
+                }
+            }
+            finally
+            {
+                if (!_keeptemp)
+                {
+                    if (_objectOut == null)
+                    {
+                        File.Delete(tempO);
+                    }
+                    if (!_compileOnly)
+                    {
+                        File.Delete(tempC);
+                    }
+                    File.Delete(temp_s);
+                }
+            }
+        }
+
+        private static List<Assembly> LoadAssemblies(IEnumerable<string> sources)
+        {
+            var assemblies = new List<Assembly>();
+            var error = false;
+
+            foreach (var a in sources.Select(LoadAssembly))
+            {
+                if (a == null)
+                {
+                    error = true;
+                    continue;
+                }
+
+                assemblies.Add(a);
+            }
+
+            if (error)
+                Environment.Exit(1);
+
+            return assemblies;
+        }
+
+        private static void LoadReferences(IEnumerable<AssemblyName> references, List<Assembly> assemblies)
+        {
+            foreach (var asm in references)
+            {
+                if (assemblies.Select(x => x.GetName().Name).Contains(asm.Name))
+                {
+                    continue;
+                }
+
+
+                Console.WriteLine("Need: {0}", asm);
+                var a = LoadReference(asm);
+
+                if (a != null)
+                {
+                    assemblies.Add(a);
+
+                    LoadReferences(a.GetReferencedAssemblies(), assemblies);
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine("Could not find reference: {0}", asm);
+                    Console.ResetColor();
+
+                    Environment.Exit(2);
+                }
+            }
+
+        }
+
+        private static Assembly LoadReference(AssemblyName assemblyName)
+        {
+            foreach (var path in LinkPaths.Select(x => Path.Combine(x, string.Format("{0}.dll", assemblyName.Name))))
+            {
+                if (!File.Exists(path))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var a = Assembly.LoadFrom(path);
+
+                    if (a.GetName().Name == assemblyName.Name)
+                    {
+                        return a;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Error load assemby {0} from {1} : {2}", assemblyName.FullName, path, ex);
+                }
+            }
+
+
+            try
+            {
+                var a = Assembly.Load(assemblyName);
+
+                return a;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error loading assemby {0} from GAC: {1}", assemblyName, ex);
+            }
+
+            return null;
+        }
+
+        private static Assembly LoadAssembly(string assembly)
+        {
+            Assembly a;
+
+            try
+            {
+                char[] pathChars = {'/', '\\'};
+
+                if (assembly.IndexOfAny(pathChars) != -1)
+                {
+                    a = Assembly.LoadFrom(assembly);
+                }
+                else
+                {
+                    var ass = assembly;
+                    if (ass.EndsWith(".dll"))
+                        ass = assembly.Substring(0, assembly.Length - 4);
+                    a = Assembly.Load(ass);
+                }
+                return a;
+            }
+            catch (FileNotFoundException)
+            {
+                var totalLog = "";
+
+                foreach (string dir in LinkPaths)
+                {
+                    var fullPath = Path.Combine(dir, assembly);
+                    if (!assembly.EndsWith(".dll") && !assembly.EndsWith(".exe"))
+                        fullPath += ".dll";
+
+                    try
+                    {
+                        a = Assembly.LoadFrom(fullPath);
+                        return a;
+                    }
+                    catch (FileNotFoundException ff)
+                    {
+                        totalLog += ff.FusionLog;
+                    }
+                }
+                Error("Cannot find assembly `" + assembly + "'");
+                Console.WriteLine("Log: \n" + totalLog);
+            }
+            catch (BadImageFormatException f)
+            {
+                Error("Cannot load assembly (bad file format)" + f.FusionLog);
+            }
+            catch (FileLoadException f)
+            {
+                Error("Cannot load assembly " + f.FusionLog);
+            }
+            catch (ArgumentNullException)
+            {
+                Error("Cannot load assembly (null argument)");
+            }
+            return null;
+        }
+
+        private static void Error(string msg)
+        {
+            Console.Error.WriteLine(msg);
+            Environment.Exit(1);
+        }
+
+        private static void Help()
+        {
+            Console.WriteLine("Usage is: mkbundle [options] assembly1 [assembly2...]\n\n" +
+                              "Options:\n" +
+                              "    -c                  Produce stub only, do not compile\n" +
+                              "    -o out              Specifies output filename\n" +
+                              "    -oo obj             Specifies output filename for helper object file\n" +
+                              "    -L path             Adds `path' to the search path for assemblies\n" +
+                              "    --nodeps            Turns off automatic dependency embedding (default)\n" +
+                              "    --deps              Turns on automatic dependency embedding\n" +
+                              "    --keeptemp          Keeps the temporary files\n" +
+                              "    --config F          Bundle system config file `F'\n" +
+                              "    --config-dir D      Set MONO_CFG_DIR to `D'\n" +
+                              "    --machine-config F  Use the given file as the machine.config for the application.\n" +
+                              "    --static            Statically link to mono libs\n" +
+                              "    --nomain            Don't include a main() function, for libraries\n" +
+                              "    -z                  Compress the assemblies before embedding.\n" +
+                              "                        You need zlib development headers and libraries.\n");
+        }
+
+        [DllImport("libc")]
+        private static extern int system(string s);
+
+        [DllImport("libc")]
+        private static extern int uname(IntPtr buf);
+
+        private static void DetectOS()
+        {
+            if (!IsUnix)
+            {
+                Console.WriteLine("OS is: Windows");
+                _style = "windows";
+                return;
+            }
+
+            IntPtr buf = UnixMarshal.AllocHeap(8192);
+            if (uname(buf) != 0)
+            {
+                Console.WriteLine("Warning: Unable to detect OS");
+                UnixMarshal.FreeHeap(buf);
+                return;
+            }
+            var os = Marshal.PtrToStringAnsi(buf);
+            Console.WriteLine("OS is: " + os);
+            if (os == "Darwin")
+                _style = "osx";
+
+            UnixMarshal.FreeHeap(buf);
+        }
+
+        private static int Execute(string cmdLine)
+        {
+            if (IsUnix)
+            {
+                Console.WriteLine(cmdLine);
+                return system(cmdLine);
+            }
+
+            // on Windows, we have to pipe the output of a
+            // `cmd` interpolation to dos2unix, because the shell does not
+            // strip the CRLFs generated by the native pkg-config distributed
+            // with Mono.
+            var b = new StringBuilder();
+            var count = 0;
+            foreach (var t in cmdLine)
+            {
+                if (t == '`')
+                {
+                    if (count%2 != 0)
+                    {
+                        b.Append("|dos2unix");
+                    }
+                    count++;
+                }
+                b.Append(t);
+            }
+            cmdLine = b.ToString();
+            Console.WriteLine(cmdLine);
+
+            var psi = new ProcessStartInfo
+                {
+                    UseShellExecute = false,
+                    FileName = "sh",
+                    Arguments = String.Format("-c \"{0}\"", cmdLine)
+                };
+
+            using (var p = Process.Start(psi))
+            {
+                p.WaitForExit();
+                return p.ExitCode;
+            }
+        }
+
+        private static string GetEnv(string name, string defaultValue)
+        {
+            var s = Environment.GetEnvironmentVariable(name);
+            return s ?? defaultValue;
+        }
+    }
 }
