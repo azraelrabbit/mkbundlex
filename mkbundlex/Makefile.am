@@ -3,10 +3,7 @@ all: build/mkbundlex.exe
 build/mkbundlex.exe:
 	mkdir -vp build
 	xbuild /p:Configuration=Release mkbundlex.sln
-	cp -vrf src/bin/Release/mkbundlex.exe build/
-	cp -vrv nix_scripts/mkbundlex build/
-	chmod +x build/mkbundlex
-	
+	cp -vrf src/bin/Release/* build/
 
 clean:
 	rm -rvf build
@@ -14,10 +11,11 @@ clean:
 
 install: build/mkbundlex.exe
 	mkdir -pv $(DESTDIR)$(PREFIX)/lib/mkbundlex/
-	cp -vf build/mkbundlex.exe $(DESTDIR)$(PREFIX)/lib/mkbundlex/
-	cp -vf build/mkbundlex $(DESTDIR)$(PREFIX)/bin/
+	mkdir -pv $(DESTDIR)$(PREFIX)/bin/
+	cp -vf build/* $(DESTDIR)$(PREFIX)/lib/mkbundlex/
+	cp -vf nix_scripts/mkbundlex $(DESTDIR)$(PREFIX)/bin/
 
 uninstall:
 	rm -vrf $(DESTDIR)$(PREFIX)/lib/mkbundlex/
-	rm -vrv $(DESTDIR)$(PREFIX)/bin/mkbundlex
+	rm -vrf $(DESTDIR)$(PREFIX)/bin/mkbundlex
 
