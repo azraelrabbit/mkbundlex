@@ -12,10 +12,9 @@ using System.Text;
 using Mono.Unix;
 using ICSharpCode.SharpZipLib.Zip.Compression.Streams;
 
-
 #endregion
 
-namespace mkbundle
+namespace mkbundlex
 {
     internal class MakeBundle
     {
