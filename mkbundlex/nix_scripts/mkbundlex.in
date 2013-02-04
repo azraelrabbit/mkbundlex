@@ -7,4 +7,4 @@ else
 fi ;
 
 
-MONO_IOMAP=ALL mono $DIR/mkbundlex.exe $*
+MONO_IOMAP=ALL mono %DESTDIR%%PREFIX%/lib/mkbundlex/mkbundlex.exe $*
