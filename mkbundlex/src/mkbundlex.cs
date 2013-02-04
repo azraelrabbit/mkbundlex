@@ -166,7 +166,9 @@ namespace mkbundlex
 
             if (_autodeps)
             {
-                Console.WriteLine("Searching for dependencies");
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("Searching for dependencies");                
+                Console.ResetColor();
 
                 var refs = assemblies.SelectMany(x => x.GetReferencedAssemblies()).Distinct().ToList();
                 LoadReferences(refs, assemblies);
@@ -174,16 +176,16 @@ namespace mkbundlex
                 Console.WriteLine();
             }
 
-            var files = assemblies.Select(asm => asm.CodeBase).ToList();            
+            var files = assemblies.Select(asm => asm.CodeBase).ToList();
 
-            Console.WriteLine("Files to bundle:");
             Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("Files to bundle:");
+            Console.ResetColor();
             foreach (var f in files)
             {                
                 Console.WriteLine(f);
                 
-            }
-            Console.ResetColor();
+            }            
             Console.WriteLine();
 
             // Special casing mscorlib.dll: any specified mscorlib.dll cannot be loaded
@@ -201,6 +203,9 @@ namespace mkbundlex
                 break;
             }
 
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("Generating bundle:");
+            Console.ResetColor();
             GenerateBundles(files);
             //GenerateJitWrapper ();
 
@@ -446,7 +451,7 @@ namespace mkbundlex
                         else
                             tc.WriteLine("static const char *config_dir = NULL;");
 
-                        var templateStream = Assembly.GetAssembly(typeof (MakeBundle)).GetManifestResourceStream(_compress ? "template_z.c" : "template.c");
+                        var templateStream = Assembly.GetAssembly(typeof (MakeBundle)).GetManifestResourceStream(_compress ? "mkbundlex.template_z.c" : "mkbundlex.template.c");
 
                         var s = new StreamReader(templateStream);
                         var template = s.ReadToEnd();
@@ -454,7 +459,7 @@ namespace mkbundlex
 
                         if (!_nomain)
                         {
-                            var templateMainStream = Assembly.GetAssembly(typeof (MakeBundle)).GetManifestResourceStream("template_main.c");
+                            var templateMainStream = Assembly.GetAssembly(typeof (MakeBundle)).GetManifestResourceStream("mkbundlex.template_main.c");
                             var st = new StreamReader(templateMainStream);
                             var maintemplate = st.ReadToEnd();
                             tc.Write(maintemplate);
