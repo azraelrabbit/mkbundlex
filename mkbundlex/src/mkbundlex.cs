@@ -166,12 +166,25 @@ namespace mkbundlex
 
             if (_autodeps)
             {
+                Console.WriteLine("Searching for dependencies");
+
                 var refs = assemblies.SelectMany(x => x.GetReferencedAssemblies()).Distinct().ToList();
                 LoadReferences(refs, assemblies);
+
+                Console.WriteLine();
             }
 
+            var files = assemblies.Select(asm => asm.CodeBase).ToList();            
 
-            var files = assemblies.Select(asm => asm.CodeBase).ToList();
+            Console.WriteLine("Files to bundle:");
+            Console.ForegroundColor = ConsoleColor.Green;
+            foreach (var f in files)
+            {                
+                Console.WriteLine(f);
+                
+            }
+            Console.ResetColor();
+            Console.WriteLine();
 
             // Special casing mscorlib.dll: any specified mscorlib.dll cannot be loaded
             // by Assembly.ReflectionFromLoadFrom(). Instead the fx assembly which runs
@@ -533,7 +546,7 @@ namespace mkbundlex
                 }
 
 
-                Console.WriteLine("Need: {0}", asm);
+                Console.WriteLine("Dependency: {0}", asm);
                 var a = LoadReference(asm);
 
                 if (a != null)
