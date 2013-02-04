@@ -52,7 +52,6 @@ AC_SUBST(PREFIX)
 AC_OUTPUT([
 Makefile	
 	mkbundlex/Makefile
-	mkbundlex/nix_scripts/mkbundlex
 ])
 
 echo ""
